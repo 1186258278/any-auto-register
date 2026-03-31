@@ -32,6 +32,11 @@ from .utils import (
 # Chrome 指纹配置
 _CHROME_PROFILES = [
     {
+        "major": 124, "impersonate": "chrome124",
+        "build": 6367, "patch_range": (60, 210),
+        "sec_ch_ua": '"Chromium";v="124", "Google Chrome";v="124", "Not.A/Brand";v="99"',
+    },
+    {
         "major": 131, "impersonate": "chrome131",
         "build": 6778, "patch_range": (69, 205),
         "sec_ch_ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
@@ -49,15 +54,25 @@ _CHROME_PROFILES = [
 ]
 
 
-def _random_chrome_version():
-    """随机选择一个 Chrome 版本"""
-    profile = random.choice(_CHROME_PROFILES)
+def _chrome_version_from_profile(profile):
     major = profile["major"]
     build = profile["build"]
     patch = random.randint(*profile["patch_range"])
     full_ver = f"{major}.0.{build}.{patch}"
     ua = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{full_ver} Safari/537.36"
     return profile["impersonate"], major, full_ver, ua, profile["sec_ch_ua"]
+
+
+def _random_chrome_version():
+    """随机选择一个 Chrome 版本"""
+    profile = random.choice(_CHROME_PROFILES)
+    return _chrome_version_from_profile(profile)
+
+
+def _stable_proxy_chrome_version():
+    """代理链路优先使用稳定指纹，降低 TLS 连接重置概率。"""
+    profile = next((p for p in _CHROME_PROFILES if p["impersonate"] == "chrome124"), _CHROME_PROFILES[0])
+    return _chrome_version_from_profile(profile)
 
 
 class ChatGPTClient:
@@ -86,8 +101,11 @@ class ChatGPTClient:
             "en-US,en;q=0.8",
         ])
         
-        # 随机 Chrome 版本
-        self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _random_chrome_version()
+        # 代理链路优先固定到更稳定的指纹，减少 TLS 抖动
+        if self.proxy:
+            self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _stable_proxy_chrome_version()
+        else:
+            self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _random_chrome_version()
         
         # 创建 session
         self.session = curl_requests.Session(impersonate=self.impersonate)
@@ -160,7 +178,12 @@ class ChatGPTClient:
                 request_kwargs = dict(kwargs)
                 if self.proxy:
                     headers = dict(request_kwargs.get("headers") or {})
-                    if "Connection" not in headers and "connection" not in headers:
+                    # auth.openai.com 在部分代理上对 Connection: close 更敏感，避免在该域强制注入
+                    if (
+                        "Connection" not in headers
+                        and "connection" not in headers
+                        and "auth.openai.com" not in str(url).lower()
+                    ):
                         headers["Connection"] = "close"
                     request_kwargs["headers"] = headers
 
@@ -221,7 +244,10 @@ class ChatGPTClient:
     def _reset_session(self):
         """重置浏览器指纹与会话，用于绕过偶发的 Cloudflare/SPA 中间页。"""
         self.device_id = str(uuid.uuid4())
-        self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _random_chrome_version()
+        if self.proxy:
+            self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _stable_proxy_chrome_version()
+        else:
+            self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _random_chrome_version()
         self.accept_language = random.choice([
             "en-US,en;q=0.9",
             "en-US,en;q=0.9,zh-CN;q=0.8",
@@ -245,6 +271,58 @@ class ChatGPTClient:
             "sec-ch-ua-platform-version": f'"{random.randint(10, 15)}.0.0"',
         })
         seed_oai_device_cookie(self.session, self.device_id)
+
+    def _recreate_session_preserve_cookies(self):
+        """保留 Cookie 重建 Session，用于处理 TLS 连接状态污染。"""
+        cookie_snapshot = []
+        try:
+            for cookie in self.session.cookies.jar:
+                cookie_snapshot.append(
+                    {
+                        "name": cookie.name,
+                        "value": cookie.value,
+                        "domain": cookie.domain,
+                        "path": cookie.path,
+                        "secure": bool(cookie.secure),
+                    }
+                )
+        except Exception:
+            cookie_snapshot = []
+
+        old_session = self.session
+        self.session = curl_requests.Session(impersonate=self.impersonate)
+        if self.proxy:
+            self.session.proxies = {"http": self.proxy, "https": self.proxy}
+
+        self.session.headers.update({
+            "User-Agent": self.ua,
+            "Accept-Language": self.accept_language,
+            "sec-ch-ua": self.sec_ch_ua,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-arch": '"x86"',
+            "sec-ch-ua-bitness": '"64"',
+            "sec-ch-ua-full-version": f'"{self.chrome_full}"',
+            "sec-ch-ua-platform-version": f'"{random.randint(10, 15)}.0.0"',
+        })
+        seed_oai_device_cookie(self.session, self.device_id)
+
+        for ck in cookie_snapshot:
+            try:
+                self.session.cookies.set(
+                    ck["name"],
+                    ck["value"],
+                    domain=ck["domain"],
+                    path=ck["path"],
+                    secure=ck["secure"],
+                )
+            except Exception:
+                continue
+
+        try:
+            old_session.close()
+        except Exception:
+            pass
 
     def _state_from_url(self, url, method="GET"):
         state = extract_flow_state(
@@ -620,6 +698,11 @@ class ChatGPTClient:
                 
                 if is_tls_error and attempt < max_retries - 1:
                     self._log(f"Authorize TLS 错误 (尝试 {attempt + 1}/{max_retries}): {error_msg[:100]}")
+                    if self.proxy:
+                        # 代理模式下发生 TLS reset 时，保留 Cookie 重建连接，避免复用损坏连接池
+                        if attempt == 0:
+                            self.impersonate, self.chrome_major, self.chrome_full, self.ua, self.sec_ch_ua = _stable_proxy_chrome_version()
+                        self._recreate_session_preserve_cookies()
                     continue
                 else:
                     self._log(f"Authorize 失败: {e}")

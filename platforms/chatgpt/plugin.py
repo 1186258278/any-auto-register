@@ -161,6 +161,12 @@ class ChatGPTPlatform(BasePlatform):
                  {"key": "api_url", "label": "TM API URL", "type": "text"},
                  {"key": "api_key", "label": "TM API Key", "type": "text"},
              ]},
+            {"id": "upload_sub2api", "label": "上传 sub2api",
+             "params": [
+                 {"key": "api_url", "label": "sub2api API URL", "type": "text"},
+                 {"key": "api_key", "label": "sub2api API Key", "type": "text"},
+                 {"key": "import_path", "label": "导入路径", "type": "text"},
+             ]},
         ]
 
     def execute_action(self, action_id: str, account: Account, params: dict) -> dict:
@@ -207,6 +213,17 @@ class ChatGPTPlatform(BasePlatform):
             from platforms.chatgpt.cpa_upload import upload_to_team_manager
             ok, msg = upload_to_team_manager(a, api_url=params.get("api_url"),
                                              api_key=params.get("api_key"))
+            return {"ok": ok, "data": msg}
+
+        elif action_id == "upload_sub2api":
+            from platforms.chatgpt.cpa_upload import upload_to_sub2api
+            ok, msg = upload_to_sub2api(
+                a,
+                api_url=params.get("api_url"),
+                api_key=params.get("api_key"),
+                import_path=params.get("import_path"),
+                proxy_url=proxy or "",
+            )
             return {"ok": ok, "data": msg}
 
         raise NotImplementedError(f"未知操作: {action_id}")

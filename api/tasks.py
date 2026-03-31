@@ -107,10 +107,11 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             from core.config_store import config_store
             merged_extra = config_store.get_all().copy()
             merged_extra.update({k: v for k, v in req.extra.items() if v is not None and v != ""})
+            # 邮箱链路默认不走代理，避免接码服务在代理出口被拦截/限流
             return create_mailbox(
                 provider=merged_extra.get("mail_provider", "laoudo"),
                 extra=merged_extra,
-                proxy=proxy,
+                proxy=None,
             )
 
         def _do_one(i: int):

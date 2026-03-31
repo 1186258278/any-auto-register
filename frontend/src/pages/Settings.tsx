@@ -160,6 +160,15 @@ const TAB_ITEMS = [
           { key: 'team_manager_key', label: 'API Key', secret: true },
         ],
       },
+      {
+        title: 'sub2api',
+        desc: '注册完成后自动导入到 sub2api 管理后台',
+        fields: [
+          { key: 'sub2api_api_url', label: 'API URL', placeholder: 'http://127.0.0.1:8089' },
+          { key: 'sub2api_api_key', label: 'API Key', secret: true },
+          { key: 'sub2api_import_path', label: '导入路径', placeholder: '/api/v1/admin/accounts/data' },
+        ],
+      },
     ],
   },
   {
