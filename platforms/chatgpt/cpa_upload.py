@@ -331,30 +331,41 @@ def upload_to_sub2api(
         "data": payload,
         "skip_default_group_bind": True,
     }
-    headers = {"Content-Type": "application/json"}
+    auth_headers_list = [{}]
     if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+        key = str(api_key).strip()
+        auth_headers_list = [
+            {"X-API-Key": key},
+            {"Authorization": f"Bearer {key}"},
+            {"Authorization": key},
+            {"api-key": key},
+        ]
 
-    try:
-        resp = cffi_requests.post(
-            url,
-            headers=headers,
-            json=request_body,
-            proxies=None,
-            verify=False,
-            timeout=30,
-            impersonate="chrome110",
-        )
-        if resp.status_code in (200, 201):
-            try:
-                data = resp.json()
-                if isinstance(data, dict) and data.get("code") not in (None, 0):
-                    return False, data.get("message") or f"上传失败: code={data.get('code')}"
-            except Exception:
-                pass
-            return True, "上传成功"
+    last_error = "上传失败"
+    for auth_headers in auth_headers_list:
+        headers = {"Content-Type": "application/json", **auth_headers}
+        try:
+            resp = cffi_requests.post(
+                url,
+                headers=headers,
+                json=request_body,
+                proxies=None,
+                verify=False,
+                timeout=30,
+                impersonate="chrome110",
+            )
+            if resp.status_code in (200, 201):
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict) and data.get("code") not in (None, 0):
+                        last_error = data.get("message") or f"上传失败: code={data.get('code')}"
+                        if "invalid token" in str(last_error).lower():
+                            continue
+                        return False, str(last_error)
+                except Exception:
+                    pass
+                return True, "上传成功"
 
-        if resp.status_code not in (404, 405, 415):
             msg = f"上传失败: HTTP {resp.status_code}"
             try:
                 detail = resp.json()
@@ -362,10 +373,17 @@ def upload_to_sub2api(
                     msg = detail.get("message") or detail.get("error") or msg
             except Exception:
                 msg = f"{msg} - {resp.text[:200]}"
-            return False, msg
-    except Exception:
-        # 回退 multipart 模式
-        pass
+            last_error = msg
+
+            low = str(msg).lower()
+            if resp.status_code in (401, 403) or "invalid token" in low:
+                continue
+            if resp.status_code not in (404, 405, 415):
+                return False, msg
+        except Exception as e:
+            last_error = f"上传异常: {e}"
+            # 继续尝试下一个鉴权头
+            continue
 
     mime = None
     try:
@@ -378,32 +396,45 @@ def upload_to_sub2api(
             filename=filename,
             content_type="application/json",
         )
-        headers2 = {k: v for k, v in headers.items() if k.lower() != "content-type"}
-        resp = cffi_requests.post(
-            url,
-            multipart=mime,
-            headers=headers2,
-            proxies=None,
-            verify=False,
-            timeout=30,
-            impersonate="chrome110",
-        )
-        if resp.status_code in (200, 201):
+        for auth_headers in auth_headers_list:
+            headers2 = {k: v for k, v in auth_headers.items() if k.lower() != "content-type"}
+            resp = cffi_requests.post(
+                url,
+                multipart=mime,
+                headers=headers2,
+                proxies=None,
+                verify=False,
+                timeout=30,
+                impersonate="chrome110",
+            )
+            if resp.status_code in (200, 201):
+                try:
+                    data = resp.json()
+                    if isinstance(data, dict) and data.get("code") not in (None, 0):
+                        msg = data.get("message") or f"上传失败: code={data.get('code')}"
+                        if "invalid token" in str(msg).lower():
+                            last_error = msg
+                            continue
+                        return False, msg
+                except Exception:
+                    pass
+                return True, "上传成功"
+
+            msg = f"上传失败: HTTP {resp.status_code}"
             try:
-                data = resp.json()
-                if isinstance(data, dict) and data.get("code") not in (None, 0):
-                    return False, data.get("message") or f"上传失败: code={data.get('code')}"
+                detail = resp.json()
+                if isinstance(detail, dict):
+                    msg = detail.get("message") or detail.get("error") or msg
             except Exception:
-                pass
-            return True, "上传成功"
-        msg = f"上传失败: HTTP {resp.status_code}"
-        try:
-            detail = resp.json()
-            if isinstance(detail, dict):
-                msg = detail.get("message") or detail.get("error") or msg
-        except Exception:
-            msg = f"{msg} - {resp.text[:200]}"
-        return False, msg
+                msg = f"{msg} - {resp.text[:200]}"
+            last_error = msg
+
+            low = str(msg).lower()
+            if resp.status_code in (401, 403) or "invalid token" in low:
+                continue
+            return False, msg
+
+        return False, str(last_error)
     except Exception as e:
         logger.error(f"sub2api 上传异常: {e}")
         return False, f"上传异常: {e}"
